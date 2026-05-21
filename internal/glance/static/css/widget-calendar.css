@@ -18,13 +18,25 @@
 }
 
 .calendar-date {
-    padding: 0.4rem 0;
     color: var(--color-text-base);
     position: relative;
     border-radius: var(--border-radius);
     background: none;
     border: none;
     font: inherit;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 0.6rem 0.2rem;
+    min-height: 3.5rem;
+    cursor: default;
+}
+
+.calendar-day-text {
+    position: relative;
+    z-index: 2;
+    line-height: 1;
 }
 
 .calendar-current-date {
@@ -34,11 +46,48 @@
 }
 
 .calendar-event-date {
-    color: var(--color-primary)
+    color: var(--color-primary);
+    font-weight: 500;
 }
 
 .calendar-spillover-date {
     color: var(--color-text-subdue);
+}
+
+/* Left side dots for timed events */
+.calendar-dots {
+    position: absolute;
+    top: 5px;
+    left: 5px;
+    display: flex;
+    gap: 3px;
+    z-index: 2;
+}
+
+.calendar-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    display: block;
+}
+
+/* Bottom lines for full-day events */
+.calendar-lines {
+    position: absolute;
+    bottom: 5px;
+    left: 5px;
+    right: 5px;
+    height: 3px;
+    display: flex;
+    gap: 2px; /* Splits the lines */
+    z-index: 2;
+}
+
+.calendar-line {
+    flex: 1; /* Evenly splits width among multiple lines */
+    height: 100%;
+    border-radius: 2px;
+    display: block;
 }
 
 .calendar-header-button {
@@ -76,12 +125,15 @@
 
 .calendar-event-tooltip {
     position: absolute;
-    background: rgba(0,0,0,0.8);
+    background: rgba(0, 0, 0, 0.85);
     color: white;
-    padding: 5px 10px;
-    border-radius: 4px;
+    padding: 6px 12px;
+    border-radius: 6px;
     pointer-events: none;
     display: none;
     z-index: 9999;
-    font-size: 12px;
+    font-size: 13px;
+    line-height: 1.5;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+    white-space: nowrap;
 }
