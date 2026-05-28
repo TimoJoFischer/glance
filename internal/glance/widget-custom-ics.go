@@ -5,10 +5,13 @@ import (
     "encoding/json"
     "fmt"
     "html/template"
+    "math"
     "sort"
     "strings"
     "time"
 
+    ics "github.com/arran4/golang-ical"
+    "github.com/teambition/rrule-go"
     "github.com/tidwall/gjson"
 )
 
@@ -20,14 +23,14 @@ type customIcsConfig struct {
 }
 
 type customIcsWidget struct {
-    widgetBase        `yaml:",inline"`
-    Ics               []customIcsConfig `yaml:"ics"`
-    Template          string            `yaml:"template"`
-    MaxEvents         int               `yaml:"max-events"`
-    DaysAhead         int               `yaml:"days-ahead"`
-    Frameless         bool              `yaml:"frameless"`
-    compiledTemplate  *template.Template `yaml:"-"`
-    CompiledHTML      template.HTML      `yaml:"-"`
+    widgetBase       `yaml:",inline"`
+    Ics              []customIcsConfig  `yaml:"ics"`
+    Template         string             `yaml:"template"`
+    MaxEvents        int                `yaml:"max-events"`
+    DaysAhead        int                `yaml:"days-ahead"`
+    Frameless        bool               `yaml:"frameless"`
+    compiledTemplate *template.Template `yaml:"-"`
+    CompiledHTML     template.HTML      `yaml:"-"`
 }
 
 func (widget *customIcsWidget) initialize() error {
@@ -47,6 +50,96 @@ func (widget *customIcsWidget) initialize() error {
     return nil
 }
 
+// expandedIcsEvent represents a single expanded occurrence of an ICS event.
+type expandedIcsEvent struct {
+    Summary  string
+    IsAllDay bool
+    Start    time.Time
+    End      time.Time
+    Duration time.Duration
+    Color    string
+}
+
+// expandIcsEvent turns a single VEvent into one or more expandedIcsEvents.
+// For non-recurring events it returns exactly one entry.
+// For events with an RRULE (weekly, yearly, daily, monthly…) it expands every
+// occurrence that falls inside [rangeStart, rangeEnd], preserving the original
+// duration and all-day flag for each occurrence.
+func expandIcsEvent(event *ics.VEvent, color string, rangeStart, rangeEnd time.Time) []expandedIcsEvent {
+    name := ""
+    if p := event.GetProperty("SUMMARY"); p != nil {
+        name = p.Value
+    }
+
+    // --- determine start time and whether this is an all-day event ---
+    var startTime time.Time
+    isAllDay := false
+
+    if start, err := event.GetStartAt(); err == nil {
+        startTime = start
+    } else if start, err := event.GetAllDayStartAt(); err == nil {
+        startTime = start
+        isAllDay = true
+    } else {
+        return nil
+    }
+
+    // --- determine duration ---
+    var duration time.Duration
+    if end, err := event.GetEndAt(); err == nil {
+        duration = end.Sub(startTime)
+    } else if end, err := event.GetAllDayEndAt(); err == nil {
+        duration = end.Sub(startTime)
+    }
+
+    // Helper that builds an expandedIcsEvent for a single occurrence.
+    makeExpanded := func(occ time.Time) expandedIcsEvent {
+        return expandedIcsEvent{
+            Summary:  name,
+            IsAllDay: isAllDay,
+            Start:    occ,
+            End:      occ.Add(duration),
+            Duration: duration,
+            Color:    color,
+        }
+    }
+
+    // --- no RRULE: single event ---
+    rruleProp := event.GetProperty("RRULE")
+    if rruleProp == nil {
+        eventEnd := startTime.Add(duration)
+        // Only include if the event overlaps the expansion window.
+        if eventEnd.Before(rangeStart) || startTime.After(rangeEnd) {
+            return nil
+        }
+        return []expandedIcsEvent{makeExpanded(startTime)}
+    }
+
+    // --- RRULE present: parse and expand ---
+    rOption, err := rrule.StrToROption(rruleProp.Value)
+    if err != nil {
+        fmt.Printf("custom-ics: failed to parse RRULE %q for event %q: %v\n",
+            rruleProp.Value, name, err)
+        // Fall back to the base event.
+        return []expandedIcsEvent{makeExpanded(startTime)}
+    }
+    rOption.Dtstart = startTime
+
+    r, err := rrule.NewRRule(*rOption)
+    if err != nil {
+        fmt.Printf("custom-ics: failed to build RRule for event %q: %v\n", name, err)
+        return []expandedIcsEvent{makeExpanded(startTime)}
+    }
+
+    occurrences := r.Between(rangeStart, rangeEnd, true /* inclusive */)
+
+    var results []expandedIcsEvent
+    for _, occ := range occurrences {
+        results = append(results, makeExpanded(occ))
+    }
+    return results
+}
+
 func (widget *customIcsWidget) update(ctx context.Context) {
     defer func() {
         if r := recover(); r != nil {
@@ -55,12 +148,19 @@ func (widget *customIcsWidget) update(ctx context.Context) {
     }()
 
     now := time.Now()
-    
+
     daysAhead := 7
     if widget.DaysAhead > 0 {
         daysAhead = widget.DaysAhead
     }
     inXDays := now.Add(time.Duration(daysAhead) * 24 * time.Hour)
+
+    // Expansion window for recurring events.
+    // Look back 90 days so that ongoing multi-day events and the current
+    // occurrence of long-running recurring series are found by the rrule
+    // expansion.  Events are filtered against now / inXDays afterwards.
+    rangeStart := now.AddDate(0, 0, -90)
+    rangeEnd := inXDays
 
     var events []map[string]interface{}
 
@@ -71,48 +171,31 @@ func (widget *customIcsWidget) update(ctx context.Context) {
         }
 
         for _, ev := range calEvents {
-            summary := ""
-            if p := ev.GetProperty("SUMMARY"); p != nil {
-                summary = p.Value
-            }
+            // Expand recurring events (weekly, yearly, daily, monthly …)
+            expanded := expandIcsEvent(ev, icsConf.Color, rangeStart, rangeEnd)
 
-            isAllDay := false
-            var start, end time.Time
+            for _, ex := range expanded {
+                start := ex.Start
+                end := ex.End
+                isAllDay := ex.IsAllDay
 
-            if s, err := ev.GetAllDayStartAt(); err == nil {
-                start = s
-                isAllDay = true
-            } else if s, err := ev.GetStartAt(); err == nil {
-                start = s
-            } else {
-                continue
-            }
-
-            if isAllDay {
-                if e, err := ev.GetAllDayEndAt(); err == nil {
-                    end = e
-                } else {
-                    end = start
+                // Adjust all-day end date: ICS stores end as the day after
+                // the last day, so shift back by one.
+                if isAllDay && !end.IsZero() {
+                    end = end.AddDate(0, 0, -1)
                 }
-            } else {
-                if e, err := ev.GetEndAt(); err == nil {
-                    end = e
-                } else {
-                    end = start
+
+                // Filter: event must still be ongoing or upcoming.
+                if !end.After(now) {
+                    continue
                 }
-            }
-
-            if isAllDay && !end.IsZero() {
-                end = end.AddDate(0, 0, -1)
-            }
-
-            if end.After(now) && start.Before(inXDays) {
-                if !isAllDay && start.Format("2006-01-02") != end.Format("2006-01-02") {
-                    end = time.Date(start.Year(), start.Month(), start.Day(), end.Hour(), end.Minute(), 0, 0, start.Location())
+                // Event must start within our look-ahead window.
+                if !start.Before(inXDays) {
+                    continue
                 }
 
                 var startIso, endIso string
-                
+
                 if isAllDay {
                     startIso = start.Format("2006-01-02")
                     endIso = end.Format("2006-01-02")
@@ -121,7 +204,7 @@ func (widget *customIcsWidget) update(ctx context.Context) {
                     endIso = end.Format(time.RFC3339)
                 }
 
-                // Calculate "in Xh Xm" directly in Go (Bypasses broken JS)
+                // Calculate human-readable "time until start".
                 hoursUntil := ""
                 diff := start.Sub(now)
                 if diff > 0 {
@@ -143,23 +226,40 @@ func (widget *customIcsWidget) update(ctx context.Context) {
                     hoursUntil = "now"
                 }
 
+                // Calculate duration in hours
+                durationHours := end.Sub(start).Hours()
+                if durationHours < 0 {
+                    durationHours = 0
+                }
+                var durationStr string
+                if durationHours == math.Trunc(durationHours) {
+                    // Whole numbers: 2h, 48h
+                    durationStr = fmt.Sprintf("%dh", int(durationHours))
+                } else {
+                    // Decimals rounded to 1 place: 0.5h, 1.5h, 24.5h
+                    durationStr = fmt.Sprintf("%.1fh", math.Round(durationHours*10)/10)
+                }
+
                 events = append(events, map[string]interface{}{
                     "color":      icsConf.Color,
-                    "summary":    summary,
+                    "summary":    ex.Summary,
                     "isAllDay":   isAllDay,
                     "startIso":   startIso,
                     "endIso":     endIso,
                     "hoursUntil": hoursUntil,
+                    "duration":   durationStr,
                     "_sort":      start,
                 })
             }
         }
     }
 
+    // Sort all events by start time.
     sort.Slice(events, func(i, j int) bool {
         return events[i]["_sort"].(time.Time).Before(events[j]["_sort"].(time.Time))
     })
 
+    // Remove internal sort key before rendering.
     for _, e := range events {
         delete(e, "_sort")
     }
@@ -177,7 +277,7 @@ func (widget *customIcsWidget) update(ctx context.Context) {
         widget.withError(err)
         return
     }
-    
+
     parsedJson := gjson.Parse(string(jsonBytes))
     data := customAPITemplateData{
         customAPIResponseData: &customAPIResponseData{

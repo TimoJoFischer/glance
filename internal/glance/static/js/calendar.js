@@ -110,31 +110,20 @@ function Dates(firstDay, events) {
         let children = dates.children;
         let index = 0;
 
-        for (let i = 0; i < FULL_MONTH_SLOTS; i++) {
-            children[i].clearClasses("calendar-spillover-date", "calendar-current-date", "calendar-event-date");
-        }
+        // Renders a single day cell, checking for events regardless of whether
+        // the day belongs to the current, previous, or next month.
+        const renderDayCell = (child, dayNum, date, isSpillover, isToday) => {
+            child.classesIf(isSpillover, "calendar-spillover-date");
+            child.classesIf(isToday, "calendar-current-date");
 
-        for (let i = 0; i < previousMonthSpilloverDays; i++, index++) {
-            children[index].classes("calendar-spillover-date").html(`<span class="calendar-day-text">${previousMonthDays - previousMonthSpilloverDays + i + 1}</span>`);
-        }
-
-        for (let i = 1; i <= currentMonthDays; i++, index++) {
-            const thisDate = new Date(newDate.getFullYear(), newDate.getMonth(), i);
-            var child = children[index];
-            
-            child.classesIf(isCurrentMonth && i === currentDate, "calendar-current-date");
-            
             if (parsedEvents) {
-                const dayEvents = getEventsForDateRaw(thisDate, parsedEvents);
-                
+                const dayEvents = getEventsForDateRaw(date, parsedEvents);
                 if (dayEvents.length > 0) {
                     child.classes("calendar-event-date");
-                    const markup = buildDayMarkup(i, dayEvents);
-                    child.html(markup);
-
+                    // Pass isSpillover to handle grayed out styling
+                    child.html(buildDayMarkup(dayNum, dayEvents, isSpillover));
                     child.on("mouseenter", (e) => {
-                        const eventList = getEventsForDateFormatted(thisDate, parsedEvents);
-                        tooltip.innerHTML = eventList.join("<br>");
+                        tooltip.innerHTML = getEventsForDateFormatted(date, parsedEvents).join("<br>");
                         tooltip.style.display = "block";
                         tooltip.style.left = e.pageX + 10 + "px";
                         tooltip.style.top = e.pageY + 10 + "px";
@@ -146,16 +135,37 @@ function Dates(firstDay, events) {
                     child.on("mouseleave", () => {
                         tooltip.style.display = "none";
                     });
-                } else {
-                    child.html(`<span class="calendar-day-text">${i}</span>`);
+                    return;
                 }
-            } else {
-                child.html(`<span class="calendar-day-text">${i}</span>`);
             }
+            
+            // Handle no-event case: Apply opacity style if spillover
+            const spilloverStyle = isSpillover ? 'style="opacity: 0.5;"' : '';
+            child.html(`<span class="calendar-day-text" ${spilloverStyle}>${dayNum}</span>`);
+        };
+
+        for (let i = 0; i < FULL_MONTH_SLOTS; i++) {
+            children[i].clearClasses("calendar-spillover-date", "calendar-current-date", "calendar-event-date");
         }
 
+        // Previous-month spillover days
+        for (let i = 0; i < previousMonthSpilloverDays; i++, index++) {
+            const dayNum = previousMonthDays - previousMonthSpilloverDays + i + 1;
+            const date = new Date(newDate.getFullYear(), newDate.getMonth() - 1, dayNum);
+            renderDayCell(children[index], dayNum, date, true, false);
+        }
+
+        // Current-month days
+        for (let i = 1; i <= currentMonthDays; i++, index++) {
+            const date = new Date(newDate.getFullYear(), newDate.getMonth(), i);
+            renderDayCell(children[index], i, date, false, isCurrentMonth && i === currentDate);
+        }
+
+        // Next-month spillover days
         for (let i = 0; i < nextMonthSpilloverDays; i++, index++) {
-            children[index].classes("calendar-spillover-date").html(`<span class="calendar-day-text">${i + 1}</span>`);
+            const dayNum = i + 1;
+            const date = new Date(newDate.getFullYear(), newDate.getMonth() + 1, dayNum);
+            renderDayCell(children[index], dayNum, date, true, false);
         }
 
         lastRenderedDate = newDate;
@@ -186,8 +196,11 @@ function Dates(firstDay, events) {
 
 // --- VISUAL MARKUP GENERATOR ---
 
-function buildDayMarkup(dayNum, events) {
-    let html = `<span class="calendar-day-text">${dayNum}</span>`;
+function buildDayMarkup(dayNum, events, isSpillover) {
+    // Define style string based on spillover status
+    const dimStyle = isSpillover ? 'opacity: 0.5;' : '';
+    
+    let html = `<span class="calendar-day-text" style="${dimStyle}">${dayNum}</span>`;
     
     const timedColors = new Set();
     const allDayColors = []; // Array to allow multiple lines of the same color
@@ -205,7 +218,7 @@ function buildDayMarkup(dayNum, events) {
 
     // Timed events (Left Dots)
     if (timedColors.size > 0) {
-        html += `<div class="calendar-dots">`;
+        html += `<div class="calendar-dots" style="${dimStyle}">`;
         for (const color of timedColors) {
             html += `<span class="calendar-dot" style="background-color: ${color};"></span>`;
         }
@@ -214,7 +227,7 @@ function buildDayMarkup(dayNum, events) {
 
     // All-Day events (Bottom Split Lines)
     if (allDayColors.length > 0) {
-        html += `<div class="calendar-lines">`;
+        html += `<div class="calendar-lines" style="${dimStyle}">`;
         for (const color of allDayColors) {
             html += `<span class="calendar-line" style="background-color: ${color};"></span>`;
         }

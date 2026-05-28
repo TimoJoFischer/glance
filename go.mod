@@ -13,6 +13,8 @@ require (
 	gopkg.in/yaml.v3 v3.0.1
 )
 
+require github.com/teambition/rrule-go v1.8.2 // indirect
+
 require (
 	github.com/PuerkitoBio/goquery v1.10.3 // indirect
 	github.com/andybalholm/cascadia v1.3.3 // indirect
