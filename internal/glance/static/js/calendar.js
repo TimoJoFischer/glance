@@ -112,6 +112,18 @@ function Dates(firstDay, events) {
 
         // Renders a single day cell, checking for events regardless of whether
         // the day belongs to the current, previous, or next month.
+        //
+        // IMPORTANT: day cells are reused DOM nodes across month switches, so
+        // we never attach mouseenter/mousemove/mouseleave listeners here. If we
+        // did, a cell that had an event in a previous month would keep an old
+        // listener (closed over that month's stale date/events) even after
+        // being re-rendered as an empty day, causing the tooltip to show a
+        // leftover event when hovering an empty cell in a different month.
+        //
+        // Instead, listeners are attached exactly once per cell (see below,
+        // outside this function) and simply read the cell's current event
+        // data at hover time via `child.dayEvents`, which we always update
+        // here - including clearing it out when a day has no events.
         const renderDayCell = (child, dayNum, date, isSpillover, isToday) => {
             child.classesIf(isSpillover, "calendar-spillover-date");
             child.classesIf(isToday, "calendar-current-date");
@@ -122,23 +134,16 @@ function Dates(firstDay, events) {
                     child.classes("calendar-event-date");
                     // Pass isSpillover to handle grayed out styling
                     child.html(buildDayMarkup(dayNum, dayEvents, isSpillover));
-                    child.on("mouseenter", (e) => {
-                        tooltip.innerHTML = getEventsForDateFormatted(date, parsedEvents).join("<br>");
-                        tooltip.style.display = "block";
-                        tooltip.style.left = e.pageX + 10 + "px";
-                        tooltip.style.top = e.pageY + 10 + "px";
-                    });
-                    child.on("mousemove", (e) => {
-                        tooltip.style.left = e.pageX + 10 + "px";
-                        tooltip.style.top = e.pageY + 10 + "px";
-                    });
-                    child.on("mouseleave", () => {
-                        tooltip.style.display = "none";
-                    });
+                    child.dayEvents = getEventsForDateFormatted(date, parsedEvents);
                     return;
                 }
             }
-            
+
+            // No events for this day: make sure any stale data from a
+            // previous render of this reused cell is cleared, so the shared
+            // hover handler has nothing to show.
+            child.dayEvents = null;
+
             // Handle no-event case: Apply opacity style if spillover
             const spilloverStyle = isSpillover ? 'style="opacity: 0.5;"' : '';
             child.html(`<span class="calendar-day-text" ${spilloverStyle}>${dayNum}</span>`);
@@ -184,13 +189,36 @@ function Dates(firstDay, events) {
         );
     };
 
+    const dayCells = elem().classes("calendar-date").duplicate(FULL_MONTH_SLOTS);
+
+    // Attach hover listeners exactly once per cell. Cells are reused across
+    // month switches, so the listener always reads whatever `dayEvents` the
+    // most recent render stored on the cell, rather than closing over the
+    // date/events that were current when the listener was created.
+    for (const cell of dayCells) {
+        cell.dayEvents = null;
+        cell.on("mouseenter", (e) => {
+            if (!cell.dayEvents || cell.dayEvents.length === 0) return;
+            tooltip.innerHTML = cell.dayEvents.join("<br>");
+            tooltip.style.display = "block";
+            tooltip.style.left = e.pageX + 10 + "px";
+            tooltip.style.top = e.pageY + 10 + "px";
+        });
+        cell.on("mousemove", (e) => {
+            if (!cell.dayEvents || cell.dayEvents.length === 0) return;
+            tooltip.style.left = e.pageX + 10 + "px";
+            tooltip.style.top = e.pageY + 10 + "px";
+        });
+        cell.on("mouseleave", () => {
+            tooltip.style.display = "none";
+        });
+    }
+
     return elem().append(
         elem().classes("calendar-dates", "margin-top-15").append(
             ...repeat(7, (i) => elem().classes("size-h6", "color-subdue").text(WEEKDAY_ABBRS[(firstDay + i) % 7]))
         ),
-        dates = elem().classes("calendar-dates", "margin-top-3").append(
-            ...elem().classes("calendar-date").duplicate(FULL_MONTH_SLOTS)
-        )
+        dates = elem().classes("calendar-dates", "margin-top-3").append(...dayCells)
     ).component({ update });
 }
 
