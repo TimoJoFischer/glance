@@ -92,6 +92,20 @@ func expandIcsEvent(event *ics.VEvent, color string, rangeStart, rangeEnd time.T
         duration = end.Sub(startTime)
     }
 
+    // Some calendar sources encode all-day events as timed events running
+    // from midnight to midnight (e.g. DTSTART 00:00 -> DTEND 00:00 the next
+    // day) instead of using the proper ICS all-day convention
+    // (DTSTART;VALUE=DATE). Detect that pattern here and treat it as an
+    // all-day event so the end-date-minus-one-day adjustment in update()
+    // applies to it too. Without this, such events render as spanning an
+    // extra day (e.g. "Sat, Aug 8 - Sun, Aug 9" for a single-day event).
+    if !isAllDay && duration > 0 && duration%(24*time.Hour) == 0 {
+        h, m, s := startTime.Clock()
+        if h == 0 && m == 0 && s == 0 {
+            isAllDay = true
+        }
+    }
+
     // Helper that builds an expandedIcsEvent for a single occurrence.
     makeExpanded := func(occ time.Time) expandedIcsEvent {
         return expandedIcsEvent{
