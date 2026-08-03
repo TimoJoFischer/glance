@@ -1,6 +1,7 @@
 package glance
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,11 +46,15 @@ type calendarEvent struct {
 	Color   string `json:"Color"`
 }
 
-// rruleExpansionWindow controls how far back and forward recurring events
+// rruleExpansionMonths controls how far back and forward recurring events
 // are expanded. Yearly events (birthdays etc.) need the full year look-back
 // so "today − 13 months … today + 13 months" covers every case the calendar
 // widget can ever display.
 const rruleExpansionMonths = 13
+
+// defaultCalendarCacheDuration is used when the user hasn't set a `cache:`
+// value for this widget in glance.yaml.
+const defaultCalendarCacheDuration = 30 * time.Minute
 
 func (widget *calendarWidget) initialize() error {
 	widget.withTitle("Calendar").withError(nil)
@@ -60,6 +65,37 @@ func (widget *calendarWidget) initialize() error {
 		return errors.New("invalid first day of week")
 	}
 
+	widget.FirstDay = int(calendarWeekdaysToInt[widget.FirstDayOfWeek])
+
+	// THE FIX: register this widget with the scheduler's cache/update
+	// mechanism. Without this call, cacheType stays at its zero value
+	// (cacheTypeInfinite), so widgetBase.requiresUpdate() always returns
+	// false and the scheduler never calls update() again after the first
+	// render - which is exactly why the calendar widget was frozen at
+	// whatever it fetched on process start, regardless of the `cache:`
+	// duration set in glance.yaml.
+	widget.withCacheDuration(defaultCalendarCacheDuration)
+
+	widget.fetchAndRender()
+
+	return nil
+}
+
+// update is called periodically by the widget scheduler once requiresUpdate
+// reports that cacheDuration has elapsed (see widget.go). This is the piece
+// that was entirely missing before - calendarWidget only had initialize(),
+// so it silently used widgetBase's no-op default update() and never
+// refreshed.
+func (widget *calendarWidget) update(ctx context.Context) {
+	widget.fetchAndRender()
+	widget.scheduleNextUpdate()
+}
+
+// fetchAndRender re-fetches all configured ICS feeds, expands recurring
+// events, and re-renders the widget's cached HTML. Used by both initialize
+// (first load) and update (subsequent scheduled refreshes) so the two paths
+// can't drift apart.
+func (widget *calendarWidget) fetchAndRender() {
 	now := time.Now()
 	rangeStart := now.AddDate(0, -rruleExpansionMonths, 0)
 	rangeEnd := now.AddDate(0, rruleExpansionMonths, 0)
@@ -81,13 +117,12 @@ func (widget *calendarWidget) initialize() error {
 
 	jsonBytes, err := json.Marshal(widgetEvents)
 	if err != nil {
-		panic(err)
+		fmt.Println("calendar: failed to marshal events:", err)
+		return
 	}
-	widget.Events = string(jsonBytes)
-	widget.FirstDay = int(calendarWeekdaysToInt[widget.FirstDayOfWeek])
-	widget.cachedHTML = widget.renderTemplate(widget, calendarWidgetTemplate)
 
-	return nil
+	widget.Events = string(jsonBytes)
+	widget.cachedHTML = widget.renderTemplate(widget, calendarWidgetTemplate)
 }
 
 // expandEvent turns a single VEvent into one or more calendarEvents.
